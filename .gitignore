@@ -2,7 +2,6 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 .DS_Store
-results/
 *_temporary_work/
 .venv/
 venv/
