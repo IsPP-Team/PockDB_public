@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the archived software release and the associated Pock-DB publication."
+
+title: "Pock-DB public binding-site preparation workflow"
+type: software
+
+authors:
+* family-names: "Dufay"
+  given-names: "Léa"
+* family-names: "Camproux"
+  given-names: "Anne-Claude"
+  
+year: 2026
+
+doi: "10.5281/zenodo.20575356"
+
+url: "https://pockdb.rpbs.univ-paris-diderot.fr/"
+
+repository-code: "https://github.com/"
+
+license: "BSD-3-Clause"
+
+abstract: "Public companion workflow for preparing and finalizing Pock-DB-style protein-ligand binding-site records with matched ligand-based and geometry-based pocket representations."
+
+preferred-citation:
+type: article
+title: "Pock-DB 2026: a standardized dataset of protein-ligand binding sites with matched ligand-based and geometry-based pocket representations"
+authors:
+- family-names: "Dufay"
+given-names: "Léa"
+- family-names: "Camproux"
+given-names: "Anne-Claude"
+year: 2026
