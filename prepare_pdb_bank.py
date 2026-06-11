@@ -1,4 +1,6 @@
+# SPDX-License-Identifier: BSD-3-Clause
 #!/usr/bin/env python3
+
 """Prepare Pock-DB-style protein-ligand binding-site entries from PDB data.
 
 This public workflow is a companion implementation for Pock-DB 2026. It
