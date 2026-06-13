@@ -61,7 +61,7 @@ DEFAULT_SERVER_TMP_SUBDIR = "pockdrug_server_tmp"
 DEFAULT_ADDITIVES_TABLE = (
     Path(__file__).resolve().parent
     / "data"
-    / "Supplementary_Data_S1_additives_CCD_HET_codes.csv"
+    / "Table1_additives_CCD_HET_codes.csv"
 )
 
 # The public Git version ships with a curated additive table. Users can
@@ -2662,8 +2662,8 @@ def load_additive_codes(
 ) -> list[str]:
     """Load crystallization-additive CCD/HET codes.
 
-    By default, the function reads the bundled supplementary table stored in
-    ``data/Supplementary_Data_S1_additives_CCD_HET_codes.csv``. The table may
+    By default, the function reads the bundled data table stored in
+    ``data/Table1_additives_CCD_HET_codes.csv``. The table may
     be semicolon-separated and contain either a ``CCD/HET code`` column or a
     ``HET code`` column. Missing files are tolerated so that the rest of the
     pipeline remains usable.
@@ -3888,7 +3888,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Optional crystallization-additive table. Defaults to the bundled "
-            "data/Supplementary_Data_S1_additives_CCD_HET_codes.csv file."
+            "data/Table1_additives_CCD_HET_codes.csv file."
         ),
     )
     parser.add_argument(
