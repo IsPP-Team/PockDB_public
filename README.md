@@ -275,10 +275,10 @@ The retained geometry-based pocket is the geometry-based cavity with the highest
 The repository includes the additive CCD/HET-code table:
 
 ```text
-data/Supplementary_Data_S1_additives_CCD_HET_codes.csv
+data/Table1_additives_CCD_HET_codes.csv
 ```
 
-An alternative additive table can be supplied with:
+An alternative additive table can be lied with:
 
 ```bash
 --additives-table path/to/custom_table.csv
