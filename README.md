@@ -40,7 +40,7 @@ pockdb_public/
 ├── README.md
 ├── .gitignore
 ├── data/
-│   └── Supplementary_Data_S1_additives_CCD_HET_codes.csv
+│   └── Table1_additives_CCD_HET_codes.csv
 └── examples/
     └── output_pockdrug/
         └── 1rm8_assembly1/
