@@ -579,6 +579,7 @@ def add_ligands_pdbe_infos(infos_fromrcsb):
                     )
                 if output_pdbe["phys_chem_properties"] is not None:
                     desc_dict = output_pdbe["phys_chem_properties"]
+                    desc_dict["Ligand MW"] = infos_fromrcsb.at[idx, "Ligand MW"]
                 else:
                     desc_dict = {}
             else:
