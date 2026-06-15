@@ -61,10 +61,10 @@ DEFAULT_SERVER_TMP_SUBDIR = "pockdrug_server_tmp"
 DEFAULT_ADDITIVES_TABLE = (
     Path(__file__).resolve().parent
     / "data"
-    / "Table1_additives_CCD_HET_codes.csv"
+    / "Table1_additive_like_or_non_primary_ligands_CCD_HET_codes.csv"
 )
 
-# The public Git version ships with a curated additive table. Users can
+# The public Git version ships with a curated additive like or non primary ligand table. Users can
 # override it with --additives-table if they want to use a different list.
 ADDITIVES_TABLE_PATH: str | None = str(DEFAULT_ADDITIVES_TABLE)
 
@@ -601,19 +601,19 @@ def add_ligands_pdbe_infos(infos_fromrcsb):
                 (k in desc_dict and desc_dict[k] is not None for k in required_keys)
             ):
                 criteria = [
-                    desc_dict["lipinski_hbd"] < 5,
-                    desc_dict["lipinski_hba"] < 10,
-                    desc_dict["exactmw"] < 500,
-                    desc_dict["crippen_clog_p"] < 5,
+                    desc_dict["lipinski_hbd"] <= 5,
+                    desc_dict["lipinski_hba"] <= 10,
+                    desc_dict["exactmw"] <= 500,
+                    desc_dict["crippen_clog_p"] <= 5,
                 ]
                 desc_dict["Lipinski"] = sum(criteria) >= 3
             else:
                 desc_dict["Lipinski"] = None
             list_additives = load_additive_codes()
             if ligand_id in list_additives:
-                desc_dict["Additive"] = True
+                desc_dict["Additive_like_or_non_primary_ligand"] = True
             else:
-                desc_dict["Additive"] = False
+                desc_dict["Additive_like_or_non_primary_ligand"] = False
             list_of_desc.append(desc_dict)
     desc_df = pd.DataFrame(list_of_desc)
     infos_fromrcsb = pd.concat([infos_fromrcsb.reset_index(drop=True), desc_df], axis=1)
@@ -2660,10 +2660,10 @@ def initialize_done_file(output_dir: str) -> None:
 def load_additive_codes(
     additive_table_path: str | os.PathLike[str] | None = None,
 ) -> list[str]:
-    """Load crystallization-additive CCD/HET codes.
+    """Load additive like or non primary ligand CCD/HET codes.
 
     By default, the function reads the bundled data table stored in
-    ``data/Table1_additives_CCD_HET_codes.csv``. The table may
+    ``data/Table1_additive_like_or_non_primary_ligands_CCD_HET_codes.csv``. The table may
     be semicolon-separated and contain either a ``CCD/HET code`` column or a
     ``HET code`` column. Missing files are tolerated so that the rest of the
     pipeline remains usable.
@@ -2671,7 +2671,7 @@ def load_additive_codes(
     path = Path(additive_table_path or ADDITIVES_TABLE_PATH or DEFAULT_ADDITIVES_TABLE)
 
     if not path.exists():
-        LOGGER.warning("Additive table not found: %s", path)
+        LOGGER.warning("Additive like or non primary ligand table not found: %s", path)
         return []
 
     try:
@@ -2764,7 +2764,7 @@ COLS_WEBSITE = [
     "lipinski_hbd",
     "PDBe-Cofactor_like",
     "Lipinski",
-    "Additive",
+    "Additive_like_or_non_primary_ligand",
     "protein_chains_environment",
     "neighbors",
     "hydrophobic_kyte_LB",
@@ -3887,8 +3887,8 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--additives-table",
         default=None,
         help=(
-            "Optional crystallization-additive table. Defaults to the bundled "
-            "data/Table1_additives_CCD_HET_codes.csv file."
+            "Optional additive like or non primary ligand table. Defaults to the bundled "
+            "data/Table1_additive_like_or_non_primary_ligands_CCD_HET_codes.csv file."
         ),
     )
     parser.add_argument(
@@ -3940,7 +3940,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def configure_runtime(args: argparse.Namespace) -> None:
-    """Configure logging and the additive table path."""
+    """Configure logging and the additive like or non primary ligand table path."""
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s | %(levelname)s | %(message)s",
