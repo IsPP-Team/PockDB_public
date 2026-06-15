@@ -594,7 +594,7 @@ def add_ligands_pdbe_infos(infos_fromrcsb):
             required_keys = [
                 "lipinski_hbd",
                 "lipinski_hba",
-                "exactmw",
+                "Ligand_MW",
                 "crippen_clog_p",
             ]
             if all(
@@ -603,7 +603,7 @@ def add_ligands_pdbe_infos(infos_fromrcsb):
                 criteria = [
                     desc_dict["lipinski_hbd"] <= 5,
                     desc_dict["lipinski_hba"] <= 10,
-                    desc_dict["exactmw"] <= 500,
+                    desc_dict["Ligand_MW"] <= 500,
                     desc_dict["crippen_clog_p"] <= 5,
                 ]
                 desc_dict["Lipinski"] = sum(criteria) >= 3
