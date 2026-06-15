@@ -999,7 +999,7 @@ def write_info_header(file_path):
         f.write("# ALT_LIG_CHOICE   : Chosen ligand alternative\n")
         f.write("# ALT_STRUCT       : Final altloc kept in structure (list)\n")
         f.write(
-            "# RENUMBER_LIG     : Renumbered ligands and ATOM residues with insertion codes (dictionary) {identifier:[old_number,new_number]}\n"
+            "# RENUMBER_LIG     : Renumbered ligands and ATOM residues with insertion codes (dictionary) {identifier:[old_number,new_number]} and Renumber a ligand residue to avoid conflicts with existing residues (dictionary) {{ligand}_{chain}:[old_number,new_number]}\n"
         )
         f.write("# NUMBER_H         : Number of hydrogen atoms removed (int)\n")
         f.write("# ============================================\n\n")
