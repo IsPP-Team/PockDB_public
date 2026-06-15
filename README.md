@@ -40,7 +40,7 @@ pockdb_public/
 ├── README.md
 ├── .gitignore
 ├── data/
-│   └── Table1_additives_CCD_HET_codes.csv
+│   └── Table1_additive_like_or_non_primary_ligands_CCD_HET_codes.csv
 └── examples/
     └── output_pockdrug/
         └── 1rm8_assembly1/
@@ -270,15 +270,15 @@ It contains structure-level, ligand-level, ligand-environment, and pocket-level 
 
 The retained geometry-based pocket is the geometry-based cavity with the highest strictly positive SO value for the corresponding ligand-based pocket.
 
-## Additive annotation table
+## Additive like or non primary ligand annotation table
 
-The repository includes the additive CCD/HET-code table:
+The repository includes the Additive like or non primary ligand CCD/HET-code table:
 
 ```text
-data/Table1_additives_CCD_HET_codes.csv
+data/Table1_additive_like_or_non_primary_ligands_CCD_HET_codes.csv
 ```
 
-An alternative additive table can be lied with:
+An alternative additive like or non primary ligand table can be lied with:
 
 ```bash
 --additives-table path/to/custom_table.csv
