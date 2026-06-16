@@ -1083,9 +1083,124 @@ def write_global_info(file_path, start_n, comb, end_n, lig_n):
         f.write(f"# ASM_END_N\t{end_n}\n")
         f.write(f"# ASM_LIG_N\t{lig_n}\n")
 
+NMR_METHODS = {
+    "SOLUTION NMR",
+    "SOLID-STATE NMR",
+}
+
+
+def is_nmr_entry(infos_fromrcsb: pd.DataFrame) -> bool:
+    """
+    Return True when the RCSB experimental method corresponds
+    to solution or solid-state NMR.
+    """
+
+    if (
+        infos_fromrcsb is None
+        or infos_fromrcsb.empty
+        or "Experimental Method" not in infos_fromrcsb.columns
+    ):
+        return False
+
+    experimental_methods = {
+        str(method).strip().upper()
+        for method in infos_fromrcsb["Experimental Method"].dropna()
+    }
+
+    return bool(
+        experimental_methods.intersection(NMR_METHODS)
+    )
+
+
+def flatten_assembly_states(obj_name: str) -> None:
+    """
+    Merge all PyMOL states generated for a biological assembly
+    into a single object containing one state.
+
+    This function must not be applied to NMR ensembles.
+    """
+
+    number_states = cmd.count_states(obj_name)
+
+    if number_states <= 1:
+        return
+
+    # Number of atoms expected after flattening
+    expected_atom_count = sum(
+        cmd.count_atoms(obj_name, state=state_number)
+        for state_number in range(1, number_states + 1)
+    )
+
+    temporary_objects = []
+
+    # Extract every state as an independent one-state object
+    for state_number in range(1, number_states + 1):
+
+        temporary_name = (
+            f"__{obj_name}_state_{state_number}"
+        )
+
+        cmd.create(
+            temporary_name,
+            obj_name,
+            source_state=state_number,
+            target_state=1,
+            discrete=1,
+        )
+
+        temporary_objects.append(
+            temporary_name
+        )
+
+    flat_object_name = f"__{obj_name}_flat"
+
+    combined_selection = " or ".join(
+        f"model {temporary_name}"
+        for temporary_name in temporary_objects
+    )
+
+    # Combine all assembly copies into one state
+    cmd.create(
+        flat_object_name,
+        combined_selection,
+        source_state=1,
+        target_state=1,
+        discrete=1,
+    )
+
+    cmd.delete(obj_name)
+
+    for temporary_name in temporary_objects:
+        cmd.delete(temporary_name)
+
+    cmd.set_name(
+        flat_object_name,
+        obj_name
+    )
+
+    cmd.sort(obj_name)
+
+    final_state_count = cmd.count_states(obj_name)
+    final_atom_count = cmd.count_atoms(
+        obj_name,
+        state=1
+    )
+
+    if final_state_count != 1:
+        raise RuntimeError(
+            f"{obj_name}: flattening failed; "
+            f"{final_state_count} states remain."
+        )
+
+    if final_atom_count != expected_atom_count:
+        raise RuntimeError(
+            f"{obj_name}: atom-count mismatch after flattening; "
+            f"expected {expected_atom_count}, obtained {final_atom_count}."
+        )
+
 
 def prepare_files_id(
-    pdb_id, entry, dir_files, list_ligands, list_monosaccharides_chain
+    pdb_id, entry, dir_files, list_ligands, list_monosaccharides_chain,is_nmr=False,
 ):
     """
     Prepare directories and processed structure files for a given PDB ID.
@@ -1098,7 +1213,9 @@ def prepare_files_id(
         RCSB entry data.
     dir_files : str
         Base directory where results are written.
-
+    is_nmr : bool, optional
+        Whether the entry was determined by solution or solid-state NMR.
+        NMR ensembles are not flattened, and only their first model is saved.
     Returns
     -------
     int
@@ -1128,7 +1245,37 @@ def prepare_files_id(
         os.makedirs(assembly_dir)
         obj_name = f"{pdb_id}_{assembly_number}"
         cmd.set("assembly", assembly_number)
-        cmd.fetch(pdb_id, obj_name, async_=0)
+        cmd.fetch(
+            pdb_id,
+            obj_name,
+            async_=0
+        )
+        number_states_before = cmd.count_states(
+            obj_name
+        )
+
+        # For non-NMR entries, multiple PyMOL states correspond
+        # to copies constituting the biological assembly.
+        if (
+            not is_nmr
+            and number_states_before > 1
+        ):
+            flatten_assembly_states(
+                obj_name
+            )
+
+        LOGGER.debug(
+            "%s assembly %s | is_nmr=%s | "
+            "states_before=%d | states_after=%d | "
+            "chains=%s | atoms=%d",
+            pdb_id,
+            assembly_number,
+            is_nmr,
+            number_states_before,
+            cmd.count_states(obj_name),
+            cmd.get_chains(obj_name),
+            cmd.count_atoms(obj_name),
+        )
         cmd.remove("resn HOH")
         cmd.remove("resn DOD")
         n_H = cmd.count_atoms(f"{obj_name} and elem H")
@@ -1171,14 +1318,40 @@ def prepare_files_id(
             alt_struct = list(set(alt_data[2]))
             cmd.sort()
             if lig_5ch_map is not None:
-                cmd.save(f"{assembly_dir}/{obj_name}.cif", state=-1)
+                # Non-NMR assemblies have already been flattened.
+                # For NMR entries, state 1 corresponds to the first model.
+                cmd.save(
+                    f"{assembly_dir}/{obj_name}.cif",
+                    obj_name,
+                    state=1,
+                )
+                # Rename ligand IDs longer than four characters
+                # only for PDB-format compatibility.
                 for lig5 in lig_5ch_map.keys():
                     lig3 = lig_5ch_map[lig5]
-                    cmd.alter(f"resn {lig5} and hetatm", f"resn='{lig3}'")
-                cmd.save(f"{assembly_dir}/{obj_name}.pdb", state=-1)
+                    cmd.alter(
+                        (
+                            f"{obj_name} and "
+                            f"resn {lig5} and hetatm"
+                        ),
+                        f"resn='{lig3}'",
+                    )
+                cmd.save(
+                    f"{assembly_dir}/{obj_name}.pdb",
+                    obj_name,
+                    state=1,
+                )
             else:
-                cmd.save(f"{assembly_dir}/{obj_name}.cif", state=-1)
-                cmd.save(f"{assembly_dir}/{obj_name}.pdb", state=-1)
+                cmd.save(
+                    f"{assembly_dir}/{obj_name}.cif",
+                    obj_name,
+                    state=1,
+                )
+                cmd.save(
+                    f"{assembly_dir}/{obj_name}.pdb",
+                    obj_name,
+                    state=1,
+                )
         if dict_assembly_infos_tmp != {}:
             difference = 0
             for key_dict_assembly_infos_tmp in dict_assembly_infos_tmp.keys():
@@ -3315,6 +3488,9 @@ def prepare_pockdrug_server_inputs(
         return None
 
     infos_fromrcsb = process_pdb(entry)
+    is_nmr = is_nmr_entry(
+        infos_fromrcsb
+    )
     if "Ligand ID" not in infos_fromrcsb.columns:
         LOGGER.warning("No ligand was reported by RCSB for %s.", pdb_id)
         return None
@@ -3327,6 +3503,7 @@ def prepare_pockdrug_server_inputs(
         dir_files,
         list_ligands,
         list_monosaccharides_chain,
+        is_nmr=is_nmr,
     )
 
     infos_path = os.path.join(dir_files, pdb_id, f"{pdb_id}__infos_assemblies.txt")
@@ -3480,6 +3657,9 @@ def launch_pdb_bank(
         return None
 
     infos_fromrcsb = process_pdb(entry)
+    is_nmr = is_nmr_entry(
+        infos_fromrcsb
+    )
     ligands_chain_all_assemblies = []
     all_ligands_SOnull = []
     all_ligands_Fail_Pockdrug = []
@@ -3494,7 +3674,7 @@ def launch_pdb_bank(
         all_ligands_fromrcsb = list(infos_fromrcsb["ligand_chain"])
         list_ligands, list_Monosaccharides = list_saccharide_ligands(infos_fromrcsb)
         tot_assembly_ids = prepare_files_id(
-            pdb_id, entry, dir_files, list_ligands, list_monosaccharides_chain
+            pdb_id, entry, dir_files, list_ligands, list_monosaccharides_chain, is_nmr=is_nmr
         )
         infos_files = pd.read_csv(
             f"{dir_files}{pdb_id}/{pdb_id}__infos_assemblies.txt", sep="\t", comment="#"
