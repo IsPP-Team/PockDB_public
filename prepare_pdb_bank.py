@@ -1112,20 +1112,86 @@ def is_nmr_entry(infos_fromrcsb: pd.DataFrame) -> bool:
     )
 
 
-def flatten_assembly_states(obj_name: str) -> None:
-    """
-    Merge all PyMOL states generated for a biological assembly
-    into a single object containing one state.
+def flatten_assembly_states(obj_name: str) -> dict:
+    """Reduce a multi-state biological assembly to one PyMOL state.
+
+    PyMOL may represent the copies of a biological assembly as separate
+    states. When chain identifiers are unique across states, all states are
+    combined into one state. When at least one chain identifier occurs in
+    several states, only state 1 is retained to avoid superimposing several
+    copies carrying the same chain identifier in the PockDrug input file.
 
     This function must not be applied to NMR ensembles.
-    """
 
+    Parameters
+    ----------
+    obj_name : str
+        Name of the PyMOL object to process.
+
+    Returns
+    -------
+    dict
+        Processing report containing the status, numbers of states before and
+        after processing, and any duplicated chain identifiers.
+    """
     number_states = cmd.count_states(obj_name)
 
     if number_states <= 1:
-        return
+        return {
+            "status": "ONE_STATE",
+            "states_before": number_states,
+            "states_after": number_states,
+            "duplicated_chains": {},
+        }
 
-    # Number of atoms expected after flattening
+    chains_by_state: dict[int, set[str]] = {}
+
+    for state_number in range(1, number_states + 1):
+        chains: set[str] = set()
+
+        cmd.iterate_state(
+            state_number,
+            obj_name,
+            "chains.add(chain)",
+            space={"chains": chains},
+        )
+
+        chains_by_state[state_number] = chains
+
+    chain_occurrences: dict[str, list[int]] = {}
+
+    for state_number, chains in chains_by_state.items():
+        for chain in chains:
+            chain_occurrences.setdefault(chain, []).append(state_number)
+
+    duplicated_chains = {
+        chain: states
+        for chain, states in chain_occurrences.items()
+        if len(states) > 1
+    }
+
+    if duplicated_chains:
+        state_1_object = f"__{obj_name}_state_1"
+
+        cmd.create(
+            state_1_object,
+            obj_name,
+            source_state=1,
+            target_state=1,
+            discrete=1,
+        )
+
+        cmd.delete(obj_name)
+        cmd.set_name(state_1_object, obj_name)
+        cmd.sort(obj_name)
+
+        return {
+            "status": "STATE_1_ONLY_DUPLICATED_CHAIN_IDS",
+            "states_before": number_states,
+            "states_after": 1,
+            "duplicated_chains": duplicated_chains,
+        }
+
     expected_atom_count = sum(
         cmd.count_atoms(obj_name, state=state_number)
         for state_number in range(1, number_states + 1)
@@ -1133,12 +1199,8 @@ def flatten_assembly_states(obj_name: str) -> None:
 
     temporary_objects = []
 
-    # Extract every state as an independent one-state object
     for state_number in range(1, number_states + 1):
-
-        temporary_name = (
-            f"__{obj_name}_state_{state_number}"
-        )
+        temporary_name = f"__{obj_name}_state_{state_number}"
 
         cmd.create(
             temporary_name,
@@ -1148,9 +1210,7 @@ def flatten_assembly_states(obj_name: str) -> None:
             discrete=1,
         )
 
-        temporary_objects.append(
-            temporary_name
-        )
+        temporary_objects.append(temporary_name)
 
     flat_object_name = f"__{obj_name}_flat"
 
@@ -1159,7 +1219,6 @@ def flatten_assembly_states(obj_name: str) -> None:
         for temporary_name in temporary_objects
     )
 
-    # Combine all assembly copies into one state
     cmd.create(
         flat_object_name,
         combined_selection,
@@ -1168,37 +1227,37 @@ def flatten_assembly_states(obj_name: str) -> None:
         discrete=1,
     )
 
+    actual_atom_count = cmd.count_atoms(
+        flat_object_name,
+        state=1,
+    )
+
+    if actual_atom_count != expected_atom_count:
+        cmd.delete(flat_object_name)
+
+        for temporary_name in temporary_objects:
+            cmd.delete(temporary_name)
+
+        raise RuntimeError(
+            f"{obj_name}: atom loss during flattening; "
+            f"expected {expected_atom_count}, obtained {actual_atom_count}."
+        )
+
     cmd.delete(obj_name)
 
     for temporary_name in temporary_objects:
         cmd.delete(temporary_name)
 
-    cmd.set_name(
-        flat_object_name,
-        obj_name
-    )
-
+    cmd.set_name(flat_object_name, obj_name)
     cmd.sort(obj_name)
 
-    final_state_count = cmd.count_states(obj_name)
-    final_atom_count = cmd.count_atoms(
-        obj_name,
-        state=1
-    )
-
-    if final_state_count != 1:
-        raise RuntimeError(
-            f"{obj_name}: flattening failed; "
-            f"{final_state_count} states remain."
-        )
-
-    if final_atom_count != expected_atom_count:
-        raise RuntimeError(
-            f"{obj_name}: atom-count mismatch after flattening; "
-            f"expected {expected_atom_count}, obtained {final_atom_count}."
-        )
-
-
+    return {
+        "status": "FLATTENED",
+        "states_before": number_states,
+        "states_after": 1,
+        "duplicated_chains": {},
+    }
+    
 def prepare_files_id(
     pdb_id, entry, dir_files, list_ligands, list_monosaccharides_chain,is_nmr=False,
 ):
@@ -1223,11 +1282,19 @@ def prepare_files_id(
     """
     start_assembly_ids = assembly_ids_single_pdb(pdb_id, entry)
     result = find_all_minimal_combinations(pdb_id, start_assembly_ids)
-    if process_single_pdb(pdb_id, entry, start_assembly_ids, result) != []:
-        assembly_ids = process_single_pdb(pdb_id, entry, start_assembly_ids, result)[0]
+    
+    processed = process_single_pdb(
+        pdb_id,
+        entry,
+        start_assembly_ids,
+        result,
+    )
+    
+    if processed:
+        assembly_ids = processed[0]
     else:
         assembly_ids = start_assembly_ids
-    tot_assembly_ids = 0
+    
     pdb_dir = f"{dir_files}{pdb_id}"
     if os.path.exists(pdb_dir):
         shutil.rmtree(pdb_dir)
@@ -1238,6 +1305,8 @@ def prepare_files_id(
     for sacc in list_monosaccharides_chain:
         list_Monosaccharides.append(sacc.split("_")[0])
     dict_assembly_infos_tmp = {}
+    flattening_reports = []
+    assemblies_kept = []
     for assembly_number in assembly_ids:
         cmd.reinitialize()
         all_dict_renumber_ligand_all = {}
@@ -1250,31 +1319,39 @@ def prepare_files_id(
             obj_name,
             async_=0
         )
-        number_states_before = cmd.count_states(
-            obj_name
+        number_states_before = cmd.count_states(obj_name)
+        
+        if not is_nmr and number_states_before > 1:
+            flatten_report = flatten_assembly_states(obj_name)
+        else:
+            flatten_report = {
+                "status": "NMR_STATE_1" if is_nmr else "ONE_STATE",
+                "states_before": number_states_before,
+                "states_after": (
+                    1 if is_nmr and number_states_before > 0
+                    else number_states_before
+                ),
+                "duplicated_chains": {},
+            }
+        
+        flattening_reports.append(
+            {
+                "assembly": assembly_number,
+                **flatten_report,
+            }
         )
-
-        # For non-NMR entries, multiple PyMOL states correspond
-        # to copies constituting the biological assembly.
-        if (
-            not is_nmr
-            and number_states_before > 1
-        ):
-            flatten_assembly_states(
-                obj_name
-            )
-
+        
         LOGGER.debug(
-            "%s assembly %s | is_nmr=%s | "
-            "states_before=%d | states_after=%d | "
-            "chains=%s | atoms=%d",
+            "%s assembly %s | is_nmr=%s | states_before=%d | "
+            "states_after=%d | chains=%s | atoms=%d | flatten_status=%s",
             pdb_id,
             assembly_number,
             is_nmr,
             number_states_before,
-            cmd.count_states(obj_name),
+            flatten_report["states_after"],
             cmd.get_chains(obj_name),
             cmd.count_atoms(obj_name),
+            flatten_report["status"],
         )
         cmd.remove("resn HOH")
         cmd.remove("resn DOD")
@@ -1311,7 +1388,6 @@ def prepare_files_id(
         alt_choice = None
         alt_struct = None
         if ligand_atoms > 0:
-            tot_assembly_ids += 1
             alt_data = enforce_single_altloc(obj_name)
             alt_res = dict(alt_data[0])
             alt_choice = alt_data[1]
@@ -1352,45 +1428,31 @@ def prepare_files_id(
                     obj_name,
                     state=1,
                 )
-        if dict_assembly_infos_tmp != {}:
-            difference = 0
-            for key_dict_assembly_infos_tmp in dict_assembly_infos_tmp.keys():
-                if dict_assembly_infos_tmp[key_dict_assembly_infos_tmp] != (
-                    pdb_id,
-                    list_hetatm_toatom,
-                    list_hetatm_ligands,
-                    list_monosaccharides_chain,
-                    lig_5ch_map,
-                    alt_res,
-                    alt_choice,
-                    alt_struct,
-                    all_dict_renumber_ligand_all,
-                    n_H,
-                ):
-                    difference += 1
-                else:
-                    pass
-            if difference == len(dict_assembly_infos_tmp.keys()):
-                write_assembly_row(
-                    info_file,
-                    pdb_id,
-                    assembly_number,
-                    list_hetatm_toatom,
-                    list_hetatm_ligands,
-                    list_monosaccharides_chain,
-                    lig_5ch_map,
-                    alt_res,
-                    alt_choice,
-                    alt_struct,
-                    all_dict_renumber_ligand_all,
-                    n_H,
-                )
-            else:
-                tot_assembly_ids -= 1
-                assembly_ids.remove(f"{assembly_number}")
-                if os.path.exists(f"{assembly_dir}"):
-                    shutil.rmtree(f"{assembly_dir}")
+
+        assembly_signature = (
+            pdb_id,
+            list_hetatm_toatom,
+            list_hetatm_ligands,
+            list_monosaccharides_chain,
+            lig_5ch_map,
+            alt_res,
+            alt_choice,
+            alt_struct,
+            all_dict_renumber_ligand_all,
+            n_H,
+        )
+        
+        is_duplicate = any(
+            previous_signature == assembly_signature
+            for previous_signature in dict_assembly_infos_tmp.values()
+        )
+        
+        if is_duplicate:
+            if os.path.exists(assembly_dir):
+                shutil.rmtree(assembly_dir)
         else:
+            assemblies_kept.append(assembly_number)
+        
             write_assembly_row(
                 info_file,
                 pdb_id,
@@ -1405,27 +1467,56 @@ def prepare_files_id(
                 all_dict_renumber_ligand_all,
                 n_H,
             )
-        dict_assembly_infos_tmp[assembly_number] = (
-            pdb_id,
-            list_hetatm_toatom,
-            list_hetatm_ligands,
-            list_monosaccharides_chain,
-            lig_5ch_map,
-            alt_res,
-            alt_choice,
-            alt_struct,
-            all_dict_renumber_ligand_all,
-            n_H,
-        )
+        
+        dict_assembly_infos_tmp[assembly_number] = assembly_signature
+
         cmd.delete(obj_name)
         filename = f"{pdb_id}.cif".lower()
         if os.path.exists(filename):
             os.remove(filename)
         cmd.reinitialize()
+
+    tot_assembly_ids = len(assemblies_kept)
+    
     write_global_info(
-        info_file, len(start_assembly_ids), result, len(assembly_ids), tot_assembly_ids
+        info_file,
+        len(start_assembly_ids),
+        result,
+        len(assemblies_kept),
+        tot_assembly_ids,
     )
-    os.rename(info_file, f"{pdb_dir}/{pdb_id}__infos_assemblies.txt")
+    
+    final_info_file = (
+        f"{pdb_dir}/"
+        f"{pdb_id}__infos_assemblies.txt"
+    )
+    
+    os.rename(
+        info_file,
+        final_info_file,
+    )
+    
+    with open(
+        final_info_file,
+        "a",
+        encoding="utf-8",
+    ) as handle:
+        handle.write("\n# FLATTENING_REPORT\n")
+    
+        handle.write(
+            "# ASM_ID\tSTATES_BEFORE\tSTATES_AFTER\t"
+            "FLATTEN_STATUS\tDUPLICATED_CHAINS\n"
+        )
+    
+        for report in flattening_reports:
+            handle.write(
+                f"# {report['assembly']}\t"
+                f"{report['states_before']}\t"
+                f"{report['states_after']}\t"
+                f"{report['status']}\t"
+                f"{repr(report['duplicated_chains'])}\n"
+            )
+    
     return tot_assembly_ids
 
 
