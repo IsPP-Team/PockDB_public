@@ -1,0 +1,38 @@
+# ============================================
+# FILE INFORMATION SUMMARY
+# ============================================
+# Format: TAB separated table
+# One row = one assembly
+#
+# Index description:
+# PDB              : PDB identifier
+# ASM_START_N      : Number of assemblies before filtering
+# ASM_COMB         : Minimal valid assembly combinations (atom count pre-filter) (list of list)
+# ASM_END_N        : Number of assemblies kept after filtering
+# ASM_LIG_N        : Number of assemblies containing at least one ligand
+# ASM_ID           : Assembly identifier currently processed
+# HET_TO_ATOM      : Modified residues converted from HETATM to ATOM
+# LIG_RCSB         : Ligands confirmed by RCSB (dictionary)
+# tMONOSACCHARIDES : Monosaccharides confirmed by RCSB (dictionary)
+# LIG_5CH_MAP      : Mapping of 5-character ligand names to 3-character PDB-compatible names (dictionary)
+# ALT_RES          : Altloc detected per residue (dictionary)
+# ALT_LIG_CHOICE   : Chosen ligand alternative
+# ALT_STRUCT       : Final altloc kept in structure (list)
+# RENUMBER_LIG     : Renumbered ligands and ATOM residues with insertion codes (dictionary) {identifier:[old_number,new_number]} and Renumber a ligand residue to avoid conflicts with existing residues (dictionary) {{ligand}_{chain}:[old_number,new_number]}
+# NUMBER_H         : Number of hydrogen atoms removed (int)
+# ============================================
+
+PDB	ASM_ID	HET_TO_ATOM	LIG_RCSB	MONOSACCHARIDES	LIG_5CH_MAP	ALT_RES	ALT_LIG_CHOICE	ALT_STRUCT	RENUMBER_LIG	NUMBER_H
+3f0g	1	None	{('A', 'ZN', '165'), ('B', 'C5P', '166'), ('C', 'C5P', '168'), ('C', 'ZN', '169'), ('B', 'ZN', '167')}	[]	None	{'B_14_LEU': {'B', 'A'}, 'C_111_ILE': {'B', 'A'}}	None	['A']	{'ZN_A': ['163', '165'], 'C5P_B': ['163', '166'], 'ZN_B': ['164', '167'], 'C5P_C': ['163', '168'], 'ZN_C': ['164', '169']}	0
+3f0g	2	None	{('E', 'ZN', '168'), ('F', 'ZN', '170'), ('E', 'C5P', '167'), ('D', 'C5P', '165'), ('D', 'ZN', '166'), ('F', 'C5P', '169')}	[]	None	{'E_14_LEU': {'B', 'A'}}	None	['A']	{'C5P_D': ['163', '165'], 'ZN_D': ['164', '166'], 'C5P_E': ['163', '167'], 'ZN_E': ['164', '168'], 'C5P_F': ['163', '169'], 'ZN_F': ['164', '170']}	0
+
+# GLOBAL INFO
+# ASM_START_N	2
+# ASM_COMB	[['1', '2']]
+# ASM_END_N	2
+# ASM_LIG_N	2
+
+# FLATTENING_REPORT
+# ASM_ID	STATES_BEFORE	STATES_AFTER	FLATTEN_STATUS	DUPLICATED_CHAINS
+# 1	1	1	ONE_STATE	{}
+# 2	1	1	ONE_STATE	{}

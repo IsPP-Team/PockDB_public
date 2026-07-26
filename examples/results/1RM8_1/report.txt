@@ -1,0 +1,6 @@
+PDB_ID	num_assembly	Ligand_ID	Chain_Asym_ID_-_ligand	num_ligand	retained_in_PockDB	exclusion_reason
+1RM8	1	ZN	B	500	False	no_eligible_primary_ligand
+1RM8	1	ZN	C	501	False	no_eligible_primary_ligand
+1RM8	1	CA	D	502	False	no_eligible_primary_ligand
+1RM8	1	CA	E	504	False	no_eligible_primary_ligand
+1RM8	1	BAT	F	800	True	not_excluded

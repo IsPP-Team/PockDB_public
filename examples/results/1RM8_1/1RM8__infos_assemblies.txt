@@ -1,0 +1,36 @@
+# ============================================
+# FILE INFORMATION SUMMARY
+# ============================================
+# Format: TAB separated table
+# One row = one assembly
+#
+# Index description:
+# PDB              : PDB identifier
+# ASM_START_N      : Number of assemblies before filtering
+# ASM_COMB         : Minimal valid assembly combinations (atom count pre-filter) (list of list)
+# ASM_END_N        : Number of assemblies kept after filtering
+# ASM_LIG_N        : Number of assemblies containing at least one ligand
+# ASM_ID           : Assembly identifier currently processed
+# HET_TO_ATOM      : Modified residues converted from HETATM to ATOM
+# LIG_RCSB         : Ligands confirmed by RCSB (dictionary)
+# tMONOSACCHARIDES : Monosaccharides confirmed by RCSB (dictionary)
+# LIG_5CH_MAP      : Mapping of 5-character ligand names to 3-character PDB-compatible names (dictionary)
+# ALT_RES          : Altloc detected per residue (dictionary)
+# ALT_LIG_CHOICE   : Chosen ligand alternative
+# ALT_STRUCT       : Final altloc kept in structure (list)
+# RENUMBER_LIG     : Renumbered ligands and ATOM residues with insertion codes (dictionary) {identifier:[old_number,new_number]} and Renumber a ligand residue to avoid conflicts with existing residues (dictionary) {{ligand}_{chain}:[old_number,new_number]}
+# NUMBER_H         : Number of hydrogen atoms removed (int)
+# ============================================
+
+PDB	ASM_ID	HET_TO_ATOM	LIG_RCSB	MONOSACCHARIDES	LIG_5CH_MAP	ALT_RES	ALT_LIG_CHOICE	ALT_STRUCT	RENUMBER_LIG	NUMBER_H
+1rm8	1	None	{('A', 'BAT', '800'), ('A', 'ZN', '501'), ('A', 'CA', '504'), ('A', 'CA', '502'), ('A', 'ZN', '500')}	[]	None	{'A_208_HIS': {'B', 'A'}, 'A_224_SER': {'B', 'A'}}	None	['A']	{}	0
+
+# GLOBAL INFO
+# ASM_START_N	1
+# ASM_COMB	[['1']]
+# ASM_END_N	1
+# ASM_LIG_N	1
+
+# FLATTENING_REPORT
+# ASM_ID	STATES_BEFORE	STATES_AFTER	FLATTEN_STATUS	DUPLICATED_CHAINS
+# 1	1	1	ONE_STATE	{}

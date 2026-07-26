@@ -46,9 +46,10 @@ import pandas as pd
 import requests
 
 try:
-    from pymol import cmd
+    from pymol import cmd, util
 except ModuleNotFoundError:
     cmd = None
+    util = None
 
 from scipy.spatial import cKDTree
 
@@ -57,6 +58,27 @@ PUBLIC_RELEASE_VERSION = "v1.0.0-server-so-single-workdir"
 
 
 DEFAULT_DISTANCE_THRESHOLD = "5.5"
+DEFAULT_LIGAND_MW_RATIO_MAX = 1.5
+
+# Ligands excluded as primary ligands in the Pock-DB 2026 workflow.
+# They may still occur as neighboring non-protein components.
+NON_ELIGIBLE_PRIMARY_LIGAND_IDS = {
+    "H", "HE", "LI", "BE", "B", "C", "N", "O", "F",
+    "NE", "NA", "MG", "AL", "SI", "P", "S", "CL",
+    "AR", "K", "CA", "SC", "TI", "V", "CR", "MN",
+    "FE", "CO", "NI", "CU", "ZN", "GA", "GE", "AS",
+    "SE", "BR", "KR", "RB", "SR", "Y", "ZR", "NB",
+    "MO", "TC", "RU", "RH", "PD", "AG", "CD", "IN",
+    "SN", "SB", "TE", "I", "XE", "CS", "BA", "LA",
+    "CE", "PR", "ND", "PM", "SM", "EU", "GD", "TB",
+    "DY", "HO", "ER", "TM", "YB", "LU", "HF", "TA",
+    "W", "RE", "OS", "IR", "PT", "AU", "HG", "TL",
+    "PB", "BI", "PO", "AT", "RN", "D",
+    "UNL", "UNX",
+    "A", "U", "G", "C", "I",
+    "DA", "DT", "DG", "DC",
+    "D8U", "OH",
+}
 DEFAULT_SERVER_TMP_SUBDIR = "pockdrug_server_tmp"
 DEFAULT_ADDITIVES_TABLE = (
     Path(__file__).resolve().parent
@@ -2733,21 +2755,104 @@ def read_server_descriptor_table(path: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=header)
 
 
-def write_descriptor_table_as_des(table: pd.DataFrame, output_dir: str) -> None:
-    """Convert a server descriptor table into one ``.des`` file per row."""
+def count_pdb_coordinate_records(
+    path: str | os.PathLike[str],
+) -> int | None:
+    """
+    Count coordinate records in an atom-level PDB pocket file.
+
+    The compact tables returned by the public PockDrug server report
+    the number of residues (Nb RES), but do not directly provide the
+    C_ATOM descriptor.
+
+    C_ATOM is therefore reconstructed by counting ATOM and HETATM
+    records in the corresponding atom-level pocket PDB file.
+    """
+    path = str(path)
+
+    if not os.path.isfile(path):
+        return None
+
+    count = 0
+
+    with open(
+        path,
+        encoding="utf-8",
+        errors="replace",
+    ) as handle:
+        for line in handle:
+            if line.startswith(
+                ("ATOM  ", "HETATM")
+            ):
+                count += 1
+
+    return count
+
+def write_descriptor_table_as_des(
+    table: pd.DataFrame,
+    output_dir: str,
+) -> None:
+    """
+    Convert a server descriptor table into one .des file per row.
+
+    C_ATOM is not present in the compact descriptor tables
+    distributed by the public PockDrug server. It is reconstructed
+    from the corresponding atom-level PDB pocket file.
+    """
     if table.empty:
         return
 
     mapping = descriptor_name_map()
     id_col = table.columns[0]
+
     for _, row in table.iterrows():
         identifier = str(row[id_col])
-        des_path = os.path.join(output_dir, f"{identifier}.des")
-        with open(des_path, "w", encoding="utf-8") as handle:
+
+        des_path = os.path.join(
+            output_dir,
+            f"{identifier}.des",
+        )
+
+        with open(
+            des_path,
+            "w",
+            encoding="utf-8",
+        ) as handle:
+
+            written_targets = set()
+
             for source_col, target_col in mapping.items():
                 if source_col not in table.columns:
                     continue
-                handle.write(f"pocket_{target_col}\t{row[source_col]}\n")
+
+                handle.write(
+                    f"pocket_{target_col}\t"
+                    f"{row[source_col]}\n"
+                )
+
+                written_targets.add(
+                    target_col
+                )
+
+            # Le serveur public ne fournit normalement
+            # pas C_ATOM dans son tableau compact.
+            if "C_ATOM" not in written_targets:
+                atom_file = os.path.join(
+                    output_dir,
+                    f"{identifier}.pdb",
+                )
+
+                atom_count = (
+                    count_pdb_coordinate_records(
+                        atom_file
+                    )
+                )
+
+                if atom_count is not None:
+                    handle.write(
+                        "pocket_C_ATOM\t"
+                        f"{atom_count}\n"
+                    )
 
 
 def build_residue_file_from_atom_file(
@@ -2908,20 +3013,6 @@ def ensure_trailing_separator(path: str) -> str:
     return path if path.endswith(os.sep) else path + os.sep
 
 
-def initialize_done_file(output_dir: str) -> None:
-    """Create the pipeline completion summary file with its header if needed."""
-    done_file = os.path.join(output_dir, "pdb_done.txt")
-    if os.path.exists(done_file):
-        return
-
-    with open(done_file, "w", encoding="utf-8") as handle:
-        handle.write(
-            "PDB_ID\tlist_validated_ligands\tnumber_validated_ligands\t"
-            "ligand_nucleic_near_A\tligands_SOnull\t"
-            "PockDrug_failures\tall_ligands_fromrcsb\n"
-        )
-
-
 def load_additive_codes(
     additive_table_path: str | os.PathLike[str] | None = None,
 ) -> list[str]:
@@ -2977,6 +3068,283 @@ def load_additive_codes(
 
 
 # ---------------------------------------------------------------------------
+# Minimal per-binding-site tracking
+# ---------------------------------------------------------------------------
+
+MINIMAL_REPORT_COLUMNS = [
+    "PDB_ID",
+    "num_assembly",
+    "Ligand_ID",
+    "Chain_Asym_ID_-_ligand",
+    "num_ligand",
+    "retained_in_PockDB",
+    "exclusion_reason",
+]
+
+
+def normalize_identifier_for_report(value):
+    """Return a stable scalar representation for report identifiers."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return str(int(value))
+
+    text = str(value).strip()
+    if text in {"", "None", "nan", "NaN", "<NA>"}:
+        return None
+    if text.endswith(".0") and text[:-2].lstrip("+-").isdigit():
+        return text[:-2]
+    return text
+
+
+def make_binding_site_id(
+    pdb_id,
+    num_assembly,
+    ligand_id,
+    chain_asym_id,
+    num_ligand,
+):
+    """Build the canonical Pock-DB binding-site identifier.
+
+    PDB identifiers are always written in uppercase in public identifiers and
+    filenames, independently of the case used on the command line.
+    """
+    normalized_pdb_id = normalize_identifier_for_report(pdb_id)
+    if normalized_pdb_id is not None:
+        normalized_pdb_id = normalized_pdb_id.upper()
+
+    values = [
+        normalized_pdb_id,
+        normalize_identifier_for_report(num_assembly),
+        normalize_identifier_for_report(ligand_id),
+        normalize_identifier_for_report(chain_asym_id),
+        normalize_identifier_for_report(num_ligand),
+    ]
+    if any(value is None for value in values):
+        return None
+    return "_".join(values)
+
+
+def build_minimal_binding_site_report(
+    cif_ligands: pd.DataFrame,
+    pdb_id: str,
+    num_assembly: str | int,
+) -> pd.DataFrame:
+    """Create one report row for every ligand candidate in one assembly."""
+    internal_columns = ["id_binding_site"] + MINIMAL_REPORT_COLUMNS
+    if cif_ligands is None or cif_ligands.empty:
+        return pd.DataFrame(columns=internal_columns)
+
+    candidates = cif_ligands.copy()
+    if "assembly" in candidates.columns:
+        candidates = candidates[
+            candidates["assembly"].astype(str).eq(str(num_assembly))
+        ].copy()
+
+    rows = []
+    for _, row in candidates.iterrows():
+        ligand_id = normalize_identifier_for_report(row.get("Ligand ID"))
+        chain_asym_id = normalize_identifier_for_report(
+            row.get("Asym ID - nonpolymer")
+        )
+        ligand_number = normalize_identifier_for_report(row.get("resid"))
+        assembly = normalize_identifier_for_report(
+            row.get("assembly", num_assembly)
+        )
+        binding_site_id = make_binding_site_id(
+            pdb_id,
+            assembly,
+            ligand_id,
+            chain_asym_id,
+            ligand_number,
+        )
+        if binding_site_id is None:
+            continue
+
+        rows.append(
+            {
+                "id_binding_site": binding_site_id,
+                "PDB_ID": normalize_identifier_for_report(pdb_id).upper(),
+                "num_assembly": assembly,
+                "Ligand_ID": ligand_id,
+                "Chain_Asym_ID_-_ligand": chain_asym_id,
+                "num_ligand": ligand_number,
+                "retained_in_PockDB": False,
+                "exclusion_reason": None,
+            }
+        )
+
+    report = pd.DataFrame(rows, columns=internal_columns)
+    if not report.empty:
+        report = report.drop_duplicates("id_binding_site", keep="first")
+    return report
+
+
+def binding_site_ids_from_tokens(
+    pdb_id: str,
+    num_assembly: str | int,
+    tokens,
+) -> set[str]:
+    """Convert ``LIG_CHAIN_RESID`` tokens to canonical binding-site IDs."""
+    output = set()
+    for token in tokens or []:
+        token = normalize_identifier_for_report(token)
+        if token is None:
+            continue
+        token = token.split(":", 1)[0]
+        parts = token.rsplit("_", 2)
+        if len(parts) != 3:
+            continue
+        binding_site_id = make_binding_site_id(
+            pdb_id,
+            num_assembly,
+            parts[0],
+            parts[1],
+            parts[2],
+        )
+        if binding_site_id is not None:
+            output.add(binding_site_id)
+    return output
+
+
+def mark_minimal_exclusion(
+    report: pd.DataFrame,
+    binding_site_ids,
+    exclusion_reason: str,
+) -> None:
+    """Set an exclusion reason only when no earlier reason was assigned."""
+    if report.empty:
+        return
+    identifiers = set(binding_site_ids or [])
+    if not identifiers:
+        return
+    mask = (
+        report["id_binding_site"].isin(identifiers)
+        & report["exclusion_reason"].isna()
+    )
+    report.loc[mask, "exclusion_reason"] = exclusion_reason
+
+
+def ids_from_final_dataframe(final_df: pd.DataFrame) -> set[str]:
+    """Return canonical IDs represented by a final or diagnostic dataframe."""
+    if final_df is None or final_df.empty:
+        return set()
+    required = {
+        "PDB_ID",
+        "num_assembly",
+        "Ligand_ID",
+        "Chain_Asym_ID_-_ligand",
+        "num_ligand",
+    }
+    if not required.issubset(final_df.columns):
+        return set()
+
+    output = set()
+    for _, row in final_df.iterrows():
+        binding_site_id = make_binding_site_id(
+            row.get("PDB_ID"),
+            row.get("num_assembly"),
+            row.get("Ligand_ID"),
+            row.get("Chain_Asym_ID_-_ligand"),
+            row.get("num_ligand"),
+        )
+        if binding_site_id is not None:
+            output.add(binding_site_id)
+    return output
+
+
+def finalize_minimal_report(
+    report: pd.DataFrame,
+    retained_ids,
+) -> pd.DataFrame:
+    """Finalize retained flags and assign a conservative fallback reason."""
+    report = report.copy()
+    retained_ids = set(retained_ids or [])
+    if report.empty:
+        return report
+
+    retainable = (
+        report["id_binding_site"].isin(retained_ids)
+        & report["exclusion_reason"].isna()
+    )
+    report.loc[retainable, "retained_in_PockDB"] = True
+    report.loc[retainable, "exclusion_reason"] = "not_excluded"
+
+    unresolved = (
+        ~report["retained_in_PockDB"].astype(bool)
+        & report["exclusion_reason"].isna()
+    )
+    report.loc[unresolved, "exclusion_reason"] = "no_pockdrug_result"
+    return report
+
+
+def write_minimal_tracking_files(
+    destination_dir: str,
+    report: pd.DataFrame,
+) -> None:
+    """Write the requested minimal ``report.txt`` and ``pdb_done.txt`` files."""
+    os.makedirs(destination_dir, exist_ok=True)
+
+    report_path = os.path.join(destination_dir, "report.txt")
+    output_report = report.copy()
+    for column in MINIMAL_REPORT_COLUMNS:
+        if column not in output_report.columns:
+            output_report[column] = None
+    output_report = output_report[MINIMAL_REPORT_COLUMNS]
+    output_report.to_csv(report_path, sep="\t", index=False)
+
+    done_path = os.path.join(destination_dir, "pdb_done.txt")
+    binding_site_ids = []
+    if "id_binding_site" in report.columns:
+        binding_site_ids = sorted(
+            {
+                str(value)
+                for value in report["id_binding_site"].dropna()
+                if str(value).strip()
+            }
+        )
+    with open(done_path, "w", encoding="utf-8") as handle:
+        handle.write("binding_site_id\n")
+        for binding_site_id in binding_site_ids:
+            handle.write(f"{binding_site_id}\n")
+
+
+def copy_assembly_info_file(
+    pdb_id: str,
+    intermediate_root: str,
+    destination_dir: str,
+    keep_assembly_info: bool,
+) -> None:
+    """Optionally preserve the assembly-transformation information file."""
+    if not keep_assembly_info:
+        return
+    source = os.path.join(
+        ensure_trailing_separator(intermediate_root),
+        pdb_id.lower(),
+        f"{pdb_id.lower()}__infos_assemblies.txt",
+    )
+    if not os.path.isfile(source):
+        LOGGER.warning("Assembly information file not found: %s", source)
+        return
+    os.makedirs(destination_dir, exist_ok=True)
+    public_pdb_id = str(pdb_id).strip().upper()
+    shutil.copyfile(
+        source,
+        os.path.join(
+            destination_dir,
+            f"{public_pdb_id}__infos_assemblies.txt",
+        ),
+    )
+
+
 # Final CSV and clean-file export
 # ---------------------------------------------------------------------------
 
@@ -3064,6 +3432,8 @@ COLS_WEBSITE = [
     "SMALLEST_SIZE_GB",
     "RADIUS_CYLINDER_LB",
     "RADIUS_CYLINDER_GB",
+    "C_ATOM_LB",
+    "C_ATOM_GB",
     "C_RESIDUES_LB",
     "C_RESIDUES_GB",
     "SO_GB",
@@ -3246,6 +3616,8 @@ def clean_scalar_values(df: pd.DataFrame) -> pd.DataFrame:
         "num_hbd",
         "lipinski_hba",
         "lipinski_hbd",
+        "C_ATOM_LB",
+        "C_ATOM_GB",
         "C_RESIDUES_LB",
         "C_RESIDUES_GB",
         "Entity_ID_polymer",
@@ -3273,12 +3645,98 @@ def mean_if_list_string(value):
     return value
 
 
-def build_final_csv_for_single_pdb(pdb_id: str, pdb_dir: str) -> pd.DataFrame:
-    """Build the final one-PDB CSV from metadata and pocket descriptors."""
+def find_intermediate_ligand_file(
+    pdb_dir: str,
+    row: pd.Series,
+) -> str | None:
+    """Return the ligand coordinate file associated with one merged row."""
+    try:
+        assembly = normalize_identifier_for_report(row.get("num_assembly"))
+        ligand_id = normalize_identifier_for_report(row.get("Ligand_ID"))
+        chain_id = normalize_identifier_for_report(
+            row.get("Chain_Asym_ID_-_ligand")
+        )
+        ligand_number = normalize_identifier_for_report(row.get("num_ligand"))
+        if None in (assembly, ligand_id, chain_id, ligand_number):
+            return None
+
+        ligand_key = f"{ligand_id}_{chain_id}_{ligand_number}"
+        ligand_dir = os.path.join(pdb_dir, assembly, ligand_key)
+        for extension in (".pdb", ".cif"):
+            candidate = os.path.join(ligand_dir, ligand_key + extension)
+            if os.path.isfile(candidate):
+                return candidate
+    except Exception:
+        return None
+    return None
+
+
+def compute_ligand_molecular_weight(ligand_file: str) -> float:
+    """Compute ligand molecular weight with PyMOL implicit hydrogens."""
+    if cmd is None or util is None:
+        raise RuntimeError("PyMOL is required for ligand mass validation.")
+    object_name = f"__pockdb_mw_{os.getpid()}_{time.time_ns()}"
+    try:
+        cmd.load(ligand_file, object_name)
+        molecular_weight = float(util.compute_mass(object_name, implicit=True))
+        if not np.isfinite(molecular_weight) or molecular_weight <= 0:
+            raise ValueError("Non-positive or non-finite ligand molecular weight.")
+        return molecular_weight
+    finally:
+        cmd.delete(object_name)
+
+
+def ligand_mass_validation_status(
+    pdb_dir: str,
+    row: pd.Series,
+    ratio_threshold: float = DEFAULT_LIGAND_MW_RATIO_MAX,
+) -> str:
+    """Validate that the ligand file represents one ligand occurrence.
+
+    Returns ``ok``, ``not_checked``, ``file_missing``, ``unreadable`` or
+    ``multiple_ligands_suspected``. A missing reference molecular weight is
+    reported as ``not_checked`` and is not an exclusion criterion.
+    """
+    reference_mw = pd.to_numeric(
+        pd.Series([row.get("Ligand_MW")]),
+        errors="coerce",
+    ).iloc[0]
+    if pd.isna(reference_mw) or float(reference_mw) <= 0:
+        return "not_checked"
+
+    ligand_file = find_intermediate_ligand_file(pdb_dir, row)
+    if ligand_file is None:
+        return "file_missing"
+
+    try:
+        observed_mw = compute_ligand_molecular_weight(ligand_file)
+    except Exception:
+        return "unreadable"
+
+    ratio = observed_mw / float(reference_mw)
+    if ratio >= float(ratio_threshold):
+        return "multiple_ligands_suspected"
+    return "ok"
+
+
+def build_final_csv_for_single_pdb(
+    pdb_id: str,
+    pdb_dir: str,
+    return_filter_report: bool = False,
+):
+    """Build the final one-PDB CSV and optionally return filter diagnostics."""
     final_infos_path = os.path.join(pdb_dir, f"{pdb_id}__final_infos.csv")
     if not os.path.isfile(final_infos_path):
         LOGGER.warning("Final metadata table not found: %s", final_infos_path)
-        return pd.DataFrame(columns=COLS_WEBSITE)
+        empty_final = pd.DataFrame(columns=COLS_WEBSITE)
+        empty_diagnostics = pd.DataFrame(
+            columns=KEY_COLUMNS + ["exclusion_reason"]
+        )
+        return (
+            (empty_final, empty_diagnostics)
+            if return_filter_report
+            else empty_final
+        )
 
     df_info = read_final_infos_for_single_pdb(final_infos_path)
     df_lb = read_descriptor_tables_for_single_pdb(
@@ -3296,26 +3754,84 @@ def build_final_csv_for_single_pdb(pdb_id: str, pdb_dir: str) -> pd.DataFrame:
     merged = merged.merge(df_gb, on=KEY_COLUMNS, how="left")
     merged = merged.loc[:, ~merged.columns.duplicated()]
 
-
-    filter_columns = ["C_RESIDUES_LB", "SO_GB"]
-    diagnostic_filter_columns = ["C_RESIDUES_LB", "C_RESIDUES_GB", "SO_GB"]
+    diagnostic_filter_columns = [
+        "C_RESIDUES_LB",
+        "C_ATOM_LB",
+        "C_RESIDUES_GB",
+        "SO_GB",
+    ]
     for col in diagnostic_filter_columns:
         if col not in merged.columns:
             merged[col] = np.nan
         merged[col] = pd.to_numeric(merged[col], errors="coerce")
 
-    valid_mask = (merged["C_RESIDUES_LB"] > 3) & (merged["SO_GB"] > 0)
+    diagnostics = merged[KEY_COLUMNS].copy()
+    diagnostics["exclusion_reason"] = None
+
+    missing_or_inconsistent_lb = (
+        merged["C_RESIDUES_LB"].isna()
+        | merged["C_ATOM_LB"].isna()
+        | merged["C_ATOM_LB"].lt(merged["C_RESIDUES_LB"])
+    )
+    diagnostics.loc[
+        missing_or_inconsistent_lb,
+        "exclusion_reason",
+    ] = "no_pockdrug_result"
+
+    # The public server ZIP is normalized to one ligand coordinate file per
+    # candidate. Its mass is checked against the RCSB ligand molecular weight
+    # to reject files that appear to contain more than one ligand occurrence.
+    mass_status = pd.Series("not_checked", index=merged.index, dtype=object)
+    mass_check_mask = diagnostics["exclusion_reason"].isna()
+    for row_index in merged.index[mass_check_mask]:
+        mass_status.loc[row_index] = ligand_mass_validation_status(
+            pdb_dir=pdb_dir,
+            row=merged.loc[row_index],
+        )
+
+    invalid_mass = mass_status.isin(
+        {
+            "file_missing",
+            "unreadable",
+            "multiple_ligands_suspected",
+        }
+    )
+    diagnostics.loc[
+        diagnostics["exclusion_reason"].isna() & invalid_mass,
+        "exclusion_reason",
+    ] = "no_pockdrug_result"
+
+    no_overlap = (
+        diagnostics["exclusion_reason"].isna()
+        & (merged["SO_GB"].isna() | merged["SO_GB"].le(0))
+    )
+    diagnostics.loc[no_overlap, "exclusion_reason"] = "no_positive_overlap"
+
+    too_small = (
+        diagnostics["exclusion_reason"].isna()
+        & merged["C_RESIDUES_LB"].le(3)
+    )
+    diagnostics.loc[
+        too_small,
+        "exclusion_reason",
+    ] = "three_or_fewer_lb_pocket_residues"
+
+    valid_mask = diagnostics["exclusion_reason"].isna()
     rejected = merged.loc[~valid_mask].copy()
     valid = merged.loc[valid_mask].copy()
+
     if valid.empty and not merged.empty:
         diagnostic_cols = [
-            col for col in KEY_COLUMNS + diagnostic_filter_columns if col in merged.columns
+            col
+            for col in KEY_COLUMNS + diagnostic_filter_columns
+            if col in merged.columns
         ]
         LOGGER.warning(
             "No row passed the final filters for %s. Candidate rows before filtering:\n%s",
             pdb_id,
             merged[diagnostic_cols].to_string(index=False),
         )
+
     remove_rejected_intermediate_files(pdb_dir, rejected, valid)
 
     valid = standardize_column_names(valid)
@@ -3323,8 +3839,11 @@ def build_final_csv_for_single_pdb(pdb_id: str, pdb_dir: str) -> pd.DataFrame:
         if col not in valid.columns:
             valid[col] = None
     valid = clean_scalar_values(valid[COLS_WEBSITE])
-    return valid
 
+    if return_filter_report:
+        diagnostics = standardize_column_names(diagnostics)
+        return valid, diagnostics
+    return valid
 
 def ligand_prefix_from_row(row: pd.Series) -> str:
     """Return the file prefix for one ligand row."""
@@ -3390,11 +3909,11 @@ def clean_final_output_directory(destination_dir: str) -> None:
 
 
 def final_assembly_output_name(pdb_id: str, num_assembly: str | int | None) -> str:
-    """Return the final output folder name for one finalized assembly."""
-    pdb_id = str(pdb_id).lower()
+    """Return the uppercase public output folder name for one assembly."""
+    public_pdb_id = str(pdb_id).strip().upper()
     if num_assembly is None:
-        return pdb_id
-    return f"{pdb_id}_{str(num_assembly)}"
+        return public_pdb_id
+    return f"{public_pdb_id}_{str(num_assembly)}"
 
 
 def export_clean_pdb_outputs(
@@ -3404,29 +3923,66 @@ def export_clean_pdb_outputs(
     final_df: pd.DataFrame,
     num_assembly: str | int | None = None,
 ) -> str:
-    """Export only final clean files and the one-PDB website CSV."""
-    pdb_id = pdb_id.lower()
-    source_pdb_dir = os.path.join(intermediate_root, pdb_id)
+    """Export final clean files using uppercase PDB identifiers.
+
+    Internal working directories remain lowercase for backward compatibility,
+    while every user-facing result folder and filename uses the canonical
+    uppercase PDB identifier.
+    """
+    internal_pdb_id = str(pdb_id).strip().lower()
+    public_pdb_id = str(pdb_id).strip().upper()
+    source_pdb_dir = os.path.join(intermediate_root, internal_pdb_id)
     destination_dir = os.path.join(
-        clean_output_dir, final_assembly_output_name(pdb_id, num_assembly)
+        clean_output_dir,
+        final_assembly_output_name(public_pdb_id, num_assembly),
     )
 
     clean_final_output_directory(destination_dir)
 
-    final_csv = os.path.join(destination_dir, f"{pdb_id}__final_website.csv")
+    final_csv = os.path.join(
+        destination_dir,
+        f"{public_pdb_id}__final_website.csv",
+    )
     if final_df.empty:
-        pd.DataFrame(columns=COLS_WEBSITE).to_csv(final_csv, index=False, sep="	")
+        pd.DataFrame(columns=COLS_WEBSITE).to_csv(
+            final_csv,
+            index=False,
+            sep="\t",
+        )
         return destination_dir
 
-    for assembly in sorted(set(final_df["num_assembly"].dropna().astype(int).astype(str))):
-        source_cif = os.path.join(source_pdb_dir, assembly, f"{pdb_id}_{assembly}.cif")
-        destination_cif = os.path.join(destination_dir, f"{pdb_id}_{assembly}_cleaned.cif")
+    final_df = final_df.copy()
+    if "PDB_ID" in final_df.columns:
+        final_df["PDB_ID"] = final_df["PDB_ID"].map(
+            lambda value: (
+                str(value).strip().upper()
+                if not pd.isna(value)
+                else value
+            )
+        )
+
+    for assembly in sorted(
+        set(final_df["num_assembly"].dropna().astype(int).astype(str))
+    ):
+        source_cif = os.path.join(
+            source_pdb_dir,
+            assembly,
+            f"{internal_pdb_id}_{assembly}.cif",
+        )
+        destination_cif = os.path.join(
+            destination_dir,
+            f"{public_pdb_id}_{assembly}_cleaned.cif",
+        )
         copy_if_exists(source_cif, destination_cif)
 
     for _, row in final_df.iterrows():
         assembly = str(int(row["num_assembly"]))
-        ligand = f"{row['Ligand_ID']}_{row['Chain_Asym_ID_-_ligand']}_{int(row['num_ligand'])}"
-        prefix = f"{pdb_id}_{assembly}_{ligand}"
+        ligand = (
+            f"{row['Ligand_ID']}_"
+            f"{row['Chain_Asym_ID_-_ligand']}_"
+            f"{int(row['num_ligand'])}"
+        )
+        prefix = f"{public_pdb_id}_{assembly}_{ligand}"
         ligand_dir = os.path.join(source_pdb_dir, assembly, ligand)
         if not os.path.isdir(ligand_dir):
             continue
@@ -3452,9 +4008,11 @@ def export_clean_pdb_outputs(
                 new_name = f"{prefix}__ligand_environment.cif"
 
             if new_name is not None:
-                shutil.copyfile(source_file, os.path.join(destination_dir, new_name))
+                shutil.copyfile(
+                    source_file,
+                    os.path.join(destination_dir, new_name),
+                )
 
-    final_csv = os.path.join(destination_dir, f"{pdb_id}__final_website.csv")
     final_df.to_csv(final_csv, index=False, sep="\t")
     return destination_dir
 
@@ -3466,14 +4024,19 @@ def export_cleaned_assemblies_for_server(
     clean_output_dir: str,
     assemblies: list[str | int],
 ) -> str:
-    """Export cleaned assembly files that must be uploaded to the PockDrug server.
+    """Export cleaned assembly files using uppercase public filenames.
 
     Both PDB and CIF files are exported. The PockDrug server expects the PDB
     file, while the CIF file is kept as a traceable cleaned structural record.
     """
-    pdb_id = pdb_id.lower()
-    source_pdb_dir = os.path.join(intermediate_root, pdb_id)
-    destination_dir = os.path.join(clean_output_dir, pdb_id, "pockdrug_server_input")
+    internal_pdb_id = str(pdb_id).strip().lower()
+    public_pdb_id = str(pdb_id).strip().upper()
+    source_pdb_dir = os.path.join(intermediate_root, internal_pdb_id)
+    destination_dir = os.path.join(
+        clean_output_dir,
+        public_pdb_id,
+        "pockdrug_server_input",
+    )
 
     if os.path.isdir(destination_dir):
         shutil.rmtree(destination_dir)
@@ -3484,15 +4047,16 @@ def export_cleaned_assemblies_for_server(
         for extension in ("pdb", "cif"):
             source_file = os.path.join(
                 source_assembly_dir,
-                f"{pdb_id}_{assembly}.{extension}",
+                f"{internal_pdb_id}_{assembly}.{extension}",
             )
             destination_file = os.path.join(
                 destination_dir,
-                f"{pdb_id}_{assembly}_cleaned.{extension}",
+                f"{public_pdb_id}_{assembly}_cleaned.{extension}",
             )
             copy_if_exists(source_file, destination_file)
 
     return destination_dir
+
 
 
 def print_pockdrug_server_submission_instructions(
@@ -3504,12 +4068,12 @@ def print_pockdrug_server_submission_instructions(
     """Print the manual PockDrug server submission instructions."""
     print("\nPockDrug server submission required")
     print("==================================")
-    print(f"PDB ID: {pdb_id.lower()}")
+    print(f"PDB ID: {pdb_id.upper()}")
     print(f"Cleaned assembly files were written to: {server_input_dir}")
     for assembly in sorted({str(assembly) for assembly in assemblies}, key=str):
         count = candidate_counts.get(str(assembly), 0)
         print(
-            f"For PDB ID {pdb_id.lower()}, assembly {assembly}: "
+            f"For PDB ID {pdb_id.upper()}, assembly {assembly}: "
             f"{count} candidate ligand-binding entity/entries were found in the "
             "cleaned assembly."
         )
@@ -3524,7 +4088,7 @@ def print_pockdrug_server_submission_instructions(
     print("\nThen run the finalization command with:")
     print(
         "python prepare_pdb_bank.py finalize "
-        f"{pdb_id.lower()} --num-assembly <assembly_number> "
+        f"{pdb_id.upper()} --num-assembly <assembly_number> "
         "--clean-output-dir /path/to/results/ "
         "--pockdrug-server-results /path/to/server_result.zip"
     )
@@ -3536,7 +4100,7 @@ def report_validated_binding_site_counts(final_df: pd.DataFrame, pdb_id: str) ->
     print("====================================")
     if final_df.empty:
         print(
-            f"For PDB ID {pdb_id.lower()}: 0 validated binding-site entries were retained "
+            f"For PDB ID {pdb_id.upper()}: 0 validated binding-site entries were retained "
             "after applying filters."
         )
         return
@@ -3544,7 +4108,7 @@ def report_validated_binding_site_counts(final_df: pd.DataFrame, pdb_id: str) ->
     counts = final_df.groupby("num_assembly").size().to_dict()
     for assembly, count in sorted(counts.items(), key=lambda item: int(item[0])):
         print(
-            f"For PDB ID {pdb_id.lower()}, assembly {int(assembly)}: "
+            f"For PDB ID {pdb_id.upper()}, assembly {int(assembly)}: "
             f"{int(count)} validated binding-site entries were retained "
             "after applying filters."
         )
@@ -3556,6 +4120,7 @@ def prepare_pockdrug_server_inputs(
     dir_files: str,
     tmp_dir: str,
     clean_output_dir: str,
+    keep_assembly_info: bool = False,
 ) -> str | None:
     """Prepare cleaned assembly files for manual PockDrug server submission.
 
@@ -3630,6 +4195,13 @@ def prepare_pockdrug_server_inputs(
         assemblies=assemblies_with_ligands,
     )
 
+    copy_assembly_info_file(
+        pdb_id=pdb_id,
+        intermediate_root=dir_files,
+        destination_dir=server_input_dir,
+        keep_assembly_info=keep_assembly_info,
+    )
+
     print_pockdrug_server_submission_instructions(
         pdb_id=pdb_id,
         server_input_dir=server_input_dir,
@@ -3689,6 +4261,7 @@ def launch_pdb_bank(
     pockdrug_server_results,
     clean_output_dir,
     num_assembly,
+    keep_assembly_info=False,
 ):
     """
     Finalize one PDB entry from PockDrug server results.
@@ -3711,12 +4284,18 @@ def launch_pdb_bank(
     tmp_root : str
         Temporary root used to normalize PockDrug server ZIP outputs.
     pockdrug_server_results : str
-        Path to one server ZIP result, or to a directory containing one ZIP per assembly.
+        Path to one server ZIP result, or to a directory containing one ZIP
+        per assembly.
     clean_output_dir : str
         Final output directory.
     num_assembly : str or int
         Assembly number to finalize. The final folder is named
-        ``<pdb_id>_<num_assembly>``.
+        ``<PDB_ID>_<num_assembly>``.
+    keep_assembly_info : bool, optional
+        If True, retain and copy the
+        ``<PDB_ID>__infos_assemblies.txt`` file into the final output
+        directory. If False, this assembly-preparation information file is
+        treated as an intermediate file and removed. Default is False.
 
     Returns
     -------
@@ -3740,7 +4319,6 @@ def launch_pdb_bank(
 
     os.makedirs(tmp_dir, exist_ok=True)
     os.makedirs(dir_files, exist_ok=True)
-    initialize_done_file(dir_files)
 
     entry = query_rcsb_assembly(pdb_id)
     if entry is None:
@@ -3791,6 +4369,11 @@ def launch_pdb_bank(
                 shutil.rmtree(f"{dir_files}{pdb_id}/{assembly_nolig}")
         results = analyze_pdb(pdb_id, list_assemblies, dir_files, tot_assembly_ids)
         cif_ligands = pd.DataFrame(results)
+        candidate_report = build_minimal_binding_site_report(
+            cif_ligands=cif_ligands,
+            pdb_id=pdb_id,
+            num_assembly=requested_assembly,
+        )
         if "assembly" in list(cif_ligands.columns):
             cif_ligands["oligomeric"] = (
                 cif_ligands["assembly"].astype(str).map(dict_ass_oligomeric)
@@ -3811,6 +4394,37 @@ def launch_pdb_bank(
             )
         else:
             ligand_nucleic_near_A = []
+
+        no_eligible_ids = binding_site_ids_from_tokens(
+            pdb_id,
+            requested_assembly,
+            list_monosaccharides_chain_resid,
+        )
+        if not candidate_report.empty:
+            no_eligible_ids.update(
+                candidate_report.loc[
+                    candidate_report["Ligand_ID"]
+                    .astype(str)
+                    .str.upper()
+                    .isin(NON_ELIGIBLE_PRIMARY_LIGAND_IDS),
+                    "id_binding_site",
+                ].dropna()
+            )
+        mark_minimal_exclusion(
+            candidate_report,
+            no_eligible_ids,
+            "no_eligible_primary_ligand",
+        )
+        mark_minimal_exclusion(
+            candidate_report,
+            binding_site_ids_from_tokens(
+                pdb_id,
+                requested_assembly,
+                ligand_nucleic_near_A,
+            ),
+            "nucleic_acid_in_environment",
+        )
+
         for assembly in list_assemblies:
             path_file_cif = f"{dir_files}{pdb_id}/{assembly}/{pdb_id}_{assembly}.cif"
             path_file_pdb = f"{dir_files}{pdb_id}/{assembly}/{pdb_id}_{assembly}.pdb"
@@ -3874,6 +4488,48 @@ def launch_pdb_bank(
             for ligand_Fail_Pockdrug in ligands_Fail_Pockdrug:
                 if ligand_Fail_Pockdrug not in list_monosaccharides_chain_resid:
                     all_ligands_Fail_Pockdrug.append(ligand_Fail_Pockdrug)
+
+            result_ids = binding_site_ids_from_tokens(
+                pdb_id,
+                assembly,
+                final_df.get("ligand_chain_resid", pd.Series(dtype=object))
+                .dropna()
+                .astype(str)
+                .tolist()
+                if not final_df.empty
+                else [],
+            )
+            no_overlap_ids = binding_site_ids_from_tokens(
+                pdb_id,
+                assembly,
+                ligands_SOnull,
+            )
+            mark_minimal_exclusion(
+                candidate_report,
+                no_overlap_ids,
+                "no_positive_overlap",
+            )
+
+            active_candidate_ids = set(
+                candidate_report.loc[
+                    candidate_report["exclusion_reason"].isna(),
+                    "id_binding_site",
+                ].dropna()
+            )
+            explicit_failure_ids = binding_site_ids_from_tokens(
+                pdb_id,
+                assembly,
+                ligands_Fail_Pockdrug,
+            )
+            no_result_ids = (
+                active_candidate_ids - result_ids - no_overlap_ids
+            ) | explicit_failure_ids
+            mark_minimal_exclusion(
+                candidate_report,
+                no_result_ids,
+                "no_pockdrug_result",
+            )
+
             final_df = final_df[
                 ~final_df["ligand_chain_resid"].isin(ligands_SOnull)
             ]
@@ -3943,7 +4599,7 @@ def launch_pdb_bank(
                 }
 
             for lig in valid_ligand_ids:
-                if lig.split("_")[0] in ["UNL", "UNX"]:
+                if lig.split("_")[0].upper() in NON_ELIGIBLE_PRIMARY_LIGAND_IDS:
                     unknown_ligands.append(lig)
                     if os.path.exists(f"{dir_files}{pdb_id}/{assembly}/{lig}"):
                         shutil.rmtree(f"{dir_files}{pdb_id}/{assembly}/{lig}")
@@ -4090,56 +4746,116 @@ def launch_pdb_bank(
                 f"{dir_files}{pdb_id}/{pdb_id}__final_infos.csv", sep="/"
             )
 
-            final_website_df = build_final_csv_for_single_pdb(
-                pdb_id, os.path.join(dir_files, pdb_id)
+            final_website_df, filter_diagnostics = build_final_csv_for_single_pdb(
+                pdb_id,
+                os.path.join(dir_files, pdb_id),
+                return_filter_report=True,
             )
-            export_clean_pdb_outputs(
+
+            if not filter_diagnostics.empty:
+                for exclusion_reason in [
+                    "no_pockdrug_result",
+                    "no_positive_overlap",
+                    "three_or_fewer_lb_pocket_residues",
+                ]:
+                    reason_rows = filter_diagnostics[
+                        filter_diagnostics["exclusion_reason"].eq(
+                            exclusion_reason
+                        )
+                    ]
+                    mark_minimal_exclusion(
+                        candidate_report,
+                        ids_from_final_dataframe(reason_rows),
+                        exclusion_reason,
+                    )
+
+            candidate_report = finalize_minimal_report(
+                candidate_report,
+                ids_from_final_dataframe(final_website_df),
+            )
+
+            destination_dir = export_clean_pdb_outputs(
                 pdb_id=pdb_id,
                 intermediate_root=dir_files,
                 clean_output_dir=clean_output_dir,
                 final_df=final_website_df,
                 num_assembly=num_assembly,
             )
+            write_minimal_tracking_files(
+                destination_dir,
+                candidate_report,
+            )
+            copy_assembly_info_file(
+                pdb_id=pdb_id,
+                intermediate_root=dir_files,
+                destination_dir=destination_dir,
+                keep_assembly_info=keep_assembly_info,
+            )
             report_validated_binding_site_counts(final_website_df, pdb_id)
             remove_intermediate_pdb_directory(dir_files, pdb_id)
             remove_empty_directory(tmp_root)
-
-            with open(f"{dir_files}/pdb_done.txt", "a+") as f:
-                f.write(
-                    f"{pdb_id}\t{ligands_chain_all_assemblies}\t{len(ligands_chain_all_assemblies)}\t{ligand_nucleic_near_A}\t{all_ligands_SOnull}\t{all_ligands_Fail_Pockdrug}\t{all_ligands_fromrcsb}\n"
-                )
         else:
             empty_final_df = pd.DataFrame(columns=COLS_WEBSITE)
-            export_clean_pdb_outputs(
+            candidate_report = finalize_minimal_report(
+                candidate_report,
+                retained_ids=set(),
+            )
+            destination_dir = export_clean_pdb_outputs(
                 pdb_id=pdb_id,
                 intermediate_root=dir_files,
                 clean_output_dir=clean_output_dir,
                 final_df=empty_final_df,
                 num_assembly=num_assembly,
             )
+            write_minimal_tracking_files(
+                destination_dir,
+                candidate_report,
+            )
+            copy_assembly_info_file(
+                pdb_id=pdb_id,
+                intermediate_root=dir_files,
+                destination_dir=destination_dir,
+                keep_assembly_info=keep_assembly_info,
+            )
             report_validated_binding_site_counts(empty_final_df, pdb_id)
             remove_intermediate_pdb_directory(dir_files, pdb_id)
             remove_empty_directory(tmp_root)
-            with open(f"{dir_files}/pdb_done.txt", "a+") as f:
-                f.write(
-                    f"{pdb_id}\t{ligands_chain_all_assemblies}\t{len(ligands_chain_all_assemblies)}\t{ligand_nucleic_near_A}\t{all_ligands_SOnull}\t{all_ligands_Fail_Pockdrug}\t{all_ligands_fromrcsb}\n"
-                )
     else:
         empty_final_df = pd.DataFrame(columns=COLS_WEBSITE)
-        export_clean_pdb_outputs(
+        no_ligand_report = pd.DataFrame(
+            [
+                {
+                    "id_binding_site": None,
+                    "PDB_ID": normalize_identifier_for_report(pdb_id).upper(),
+                    "num_assembly": normalize_identifier_for_report(num_assembly),
+                    "Ligand_ID": None,
+                    "Chain_Asym_ID_-_ligand": None,
+                    "num_ligand": None,
+                    "retained_in_PockDB": False,
+                    "exclusion_reason": "no_nonpolymer_ligand",
+                }
+            ]
+        )
+        destination_dir = export_clean_pdb_outputs(
             pdb_id=pdb_id,
             intermediate_root=dir_files,
             clean_output_dir=clean_output_dir,
             final_df=empty_final_df,
             num_assembly=num_assembly,
         )
+        write_minimal_tracking_files(
+            destination_dir,
+            no_ligand_report,
+        )
+        copy_assembly_info_file(
+            pdb_id=pdb_id,
+            intermediate_root=dir_files,
+            destination_dir=destination_dir,
+            keep_assembly_info=keep_assembly_info,
+        )
         report_validated_binding_site_counts(empty_final_df, pdb_id)
         remove_intermediate_pdb_directory(dir_files, pdb_id)
         remove_empty_directory(tmp_root)
-        with open(f"{dir_files}/pdb_done.txt", "a+") as f:
-            f.write(
-                f"{pdb_id}\t{ligands_chain_all_assemblies}\t{len(ligands_chain_all_assemblies)}\t{[]}\t{[]}\t{[]}\t{[]}\n"
-            )
 
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
@@ -4161,6 +4877,14 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Optional additive like or non primary ligand table. Defaults to the bundled "
             "data/Table1_additive_like_or_non_primary_ligands_CCD_HET_codes.csv file."
+        ),
+    )
+    parser.add_argument(
+        "--keep-assembly-info",
+        action="store_true",
+        help=(
+            "Keep <PDB_ID>__infos_assemblies.txt in the command output "
+            "directory to document assembly cleaning and renumbering changes."
         ),
     )
     parser.add_argument(
@@ -4197,7 +4921,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Assembly number corresponding to the PockDrug server ZIP to finalize. "
-            "The final output folder is named <pdb_id>_<num_assembly>."
+            "The final output folder is named <PDB_ID>_<num_assembly> with an uppercase PDB ID."
         ),
     )
     finalize_parser.add_argument(
@@ -4278,6 +5002,7 @@ def main(argv: list[str] | None = None) -> int:
                 dir_files=work_paths["intermediate_dir"],
                 tmp_dir=work_paths["tmp_fetch_dir"],
                 clean_output_dir=clean_output_dir,
+                keep_assembly_info=args.keep_assembly_info,
             )
             return 0
 
@@ -4294,6 +5019,7 @@ def main(argv: list[str] | None = None) -> int:
                 pockdrug_server_results=args.pockdrug_server_results,
                 clean_output_dir=clean_output_dir,
                 num_assembly=str(args.num_assembly),
+                keep_assembly_info=args.keep_assembly_info,
             )
             return 0
 
