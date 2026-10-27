@@ -1817,29 +1817,72 @@ def parse_mmcif_atoms(filepath: str) -> list:
     return atoms
 
 
+
 def count_nearby_residues(
     molecule_atoms: list,
     all_atoms: list,
-    threshold: float = float(DISTANCE_THRESHOLD),
+    threshold: float | None = None,
     nucleic: bool = False,
 ) -> tuple[int, list[str]]:
-    """Count nearby residues within a distance threshold for protein or nucleic acids."""
-    reference_set = NUCLEIC_RESIDUES if nucleic else PROTEIN_RESIDUES
+    """
+    Count nearby protein or nucleic acid residues.
+
+    Modified residues converted to ATOM are classified
+    according to their polymer chain when that chain
+    can be unambiguously identified from standard residues.
+    """
+    if threshold is None:
+        threshold = float(DISTANCE_THRESHOLD)
+
+    protein_chains = {
+        chain
+        for _, _, res, _, chain, _, tag in all_atoms
+        if tag == "atom" and res in PROTEIN_RESIDUES
+    }
+
+    nucleic_chains = {
+        chain
+        for _, _, res, _, chain, _, tag in all_atoms
+        if tag == "atom" and res in NUCLEIC_RESIDUES
+    }
+
     neighbors = set()
-    for e1, c1, r1, id1, ch1 in molecule_atoms:
-        for e2, c2, r2, id2, ch2, chauth2, tag2 in all_atoms:
+
+    for _, c1, r1, id1, ch1 in molecule_atoms:
+        for _, c2, r2, id2, ch2, _, tag2 in all_atoms:
+
+            if tag2 != "atom":
+                continue
+
             if (r1, id1, ch1) == (r2, id2, ch2):
                 continue
-            if (
-                distance(c1, c2) <= threshold
-                and r2 in reference_set
-                and (tag2 == "atom")
-            ):
+
+            if nucleic:
+                valid = (
+                    r2 in NUCLEIC_RESIDUES
+                    or (
+                        ch2 in nucleic_chains
+                        and ch2 not in protein_chains
+                    )
+                )
+            else:
+                valid = (
+                    r2 in PROTEIN_RESIDUES
+                    or (
+                        ch2 in protein_chains
+                        and ch2 not in nucleic_chains
+                    )
+                )
+
+            if valid and distance(c1, c2) <= threshold:
                 neighbors.add((r2, id2, ch2))
+
     neighbor_list = sorted(
-        [f"{res}:{resid}:{chain}" for res, resid, chain in neighbors]
+        f"{res}:{resid}:{chain}"
+        for res, resid, chain in neighbors
     )
-    return (len(neighbors), neighbor_list)
+
+    return len(neighbors), neighbor_list
 
 
 def analyze_pdb(
@@ -1972,24 +2015,7 @@ def analyze_pdb(
                                     f"{neigh_chain_auth}_{neigh_resid}"
                                 ] = min(prev, dist)
                             elif neigh_tag == "atom":
-                                if (
-                                    neigh_res in PROTEIN_RESIDUES
-                                    or neigh_res in NUCLEIC_RESIDUES
-                                ):
-                                    peptide_neighbor_chains.add(neigh_chain)
-                                elif neigh_res not in WATER_NAMES:
-                                    prev = neighbors_dict[neigh_res].get(
-                                        neigh_chain, dist
-                                    )
-                                    neighbors_dict[neigh_res][
-                                        f"{neigh_chain}_{neigh_resid}"
-                                    ] = min(prev, dist)
-                                    prev = neighbors_dict_auth[neigh_res].get(
-                                        neigh_chain_auth, dist
-                                    )
-                                    neighbors_dict_auth[neigh_res][
-                                        f"{neigh_chain_auth}_{neigh_resid}"
-                                    ] = min(prev, dist)
+                                peptide_neighbor_chains.add(neigh_chain)
                 molecule_atoms_full = [
                     (elem, coord, mol_id[0], mol_id[2], mol_id[1])
                     for elem, coord, _ in atoms_list
