@@ -607,13 +607,19 @@ def add_ligands_pdbe_infos(infos_fromrcsb):
             else:
                 desc_dict = {}
             url_cofactor = f"https://www.ebi.ac.uk/pdbe/api/v2/pdb/compound/cofactors/het/{ligand_id}"
-            response = requests.get(url_cofactor)
-            if response.status_code == 200:
-                desc_dict["PDBe-Cofactor_like"] = True
-            elif response.status_code == 404:
-                desc_dict["PDBe-Cofactor_like"] = False
-            else:
+            try:
+                response = requests.get(url_cofactor, timeout=20)
+            
+                if response.status_code == 200:
+                    desc_dict["PDBe-Cofactor_like"] = True
+                elif response.status_code == 404:
+                    desc_dict["PDBe-Cofactor_like"] = False
+                else:
+                    desc_dict["PDBe-Cofactor_like"] = None
+            
+            except requests.RequestException:
                 desc_dict["PDBe-Cofactor_like"] = None
+
             required_keys = [
                 "lipinski_hbd",
                 "lipinski_hba",
@@ -1817,71 +1823,53 @@ def parse_mmcif_atoms(filepath: str) -> list:
     return atoms
 
 
-
 def count_nearby_residues(
     molecule_atoms: list,
     all_atoms: list,
     threshold: float | None = None,
     nucleic: bool = False,
 ) -> tuple[int, list[str]]:
-    """
-    Count nearby protein or nucleic acid residues.
-
-    Modified residues converted to ATOM are classified
-    according to their polymer chain when that chain
-    can be unambiguously identified from standard residues.
-    """
+    """Count nearby protein or nucleic acid residues, including modified residues."""
     if threshold is None:
         threshold = float(DISTANCE_THRESHOLD)
 
-    protein_chains = {
-        chain
-        for _, _, res, _, chain, _, tag in all_atoms
-        if tag == "atom" and res in PROTEIN_RESIDUES
-    }
+    reference_set = NUCLEIC_RESIDUES if nucleic else PROTEIN_RESIDUES
+    other_set = PROTEIN_RESIDUES if nucleic else NUCLEIC_RESIDUES
 
-    nucleic_chains = {
-        chain
-        for _, _, res, _, chain, _, tag in all_atoms
-        if tag == "atom" and res in NUCLEIC_RESIDUES
+    reference_chains = {
+        ch2
+        for e2, c2, r2, id2, ch2, chauth2, tag2 in all_atoms
+        if tag2 == "atom" and r2 in reference_set
+    }
+    other_chains = {
+        ch2
+        for e2, c2, r2, id2, ch2, chauth2, tag2 in all_atoms
+        if tag2 == "atom" and r2 in other_set
     }
 
     neighbors = set()
 
-    for _, c1, r1, id1, ch1 in molecule_atoms:
-        for _, c2, r2, id2, ch2, _, tag2 in all_atoms:
-
-            if tag2 != "atom":
-                continue
-
+    for e1, c1, r1, id1, ch1 in molecule_atoms:
+        for e2, c2, r2, id2, ch2, chauth2, tag2 in all_atoms:
             if (r1, id1, ch1) == (r2, id2, ch2):
                 continue
-
-            if nucleic:
-                valid = (
-                    r2 in NUCLEIC_RESIDUES
+            if (
+                distance(c1, c2) <= threshold
+                and tag2 == "atom"
+                and (
+                    r2 in reference_set
                     or (
-                        ch2 in nucleic_chains
-                        and ch2 not in protein_chains
+                        ch2 in reference_chains
+                        and ch2 not in other_chains
+                        and r2 not in other_set
                     )
                 )
-            else:
-                valid = (
-                    r2 in PROTEIN_RESIDUES
-                    or (
-                        ch2 in protein_chains
-                        and ch2 not in nucleic_chains
-                    )
-                )
-
-            if valid and distance(c1, c2) <= threshold:
+            ):
                 neighbors.add((r2, id2, ch2))
 
     neighbor_list = sorted(
-        f"{res}:{resid}:{chain}"
-        for res, resid, chain in neighbors
+        [f"{res}:{resid}:{chain}" for res, resid, chain in neighbors]
     )
-
     return len(neighbors), neighbor_list
 
 
@@ -2004,16 +1992,12 @@ def analyze_pdb(
                         dist = distance(lig_xyz, neigh_coord)
                         if dist <= float(DISTANCE_THRESHOLD):
                             if neigh_tag == "hetatm" and neigh_res not in WATER_NAMES:
-                                prev = neighbors_dict[neigh_res].get(neigh_chain, dist)
-                                neighbors_dict[neigh_res][
-                                    f"{neigh_chain}_{neigh_resid}"
-                                ] = min(prev, dist)
-                                prev = neighbors_dict_auth[neigh_res].get(
-                                    neigh_chain_auth, dist
-                                )
-                                neighbors_dict_auth[neigh_res][
-                                    f"{neigh_chain_auth}_{neigh_resid}"
-                                ] = min(prev, dist)
+                                key = f"{neigh_chain}_{neigh_resid}"
+                                key_auth = f"{neigh_chain_auth}_{neigh_resid}"
+                                prev = neighbors_dict[neigh_res].get(key, float("inf"))
+                                neighbors_dict[neigh_res][key] = min(prev, dist)
+                                prev_auth = neighbors_dict_auth[neigh_res].get(key_auth, float("inf"))
+                                neighbors_dict_auth[neigh_res][key_auth] = min(prev_auth, dist)
                             elif neigh_tag == "atom":
                                 peptide_neighbor_chains.add(neigh_chain)
                 molecule_atoms_full = [
